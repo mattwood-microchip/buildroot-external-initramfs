@@ -1,0 +1,7 @@
+bootargs=console=ttyS0,115200 root=/dev/ram0 rw atmel.pm_modes=standby,ulp1 video=Unknown-1:800x480-16
+bootcmd=fatload mmc 0:1 0x22000000 zImage; fatload mmc 0:1 0x21000000 at91-sama5d27_som1_ek.dtb; bootz 0x22000000 - 0x21000000
+bootdelay=1
+loadaddr=0x21000000
+stderr=serial@ffffee00
+stdin=serial@ffffee00
+stdout=serial@ffffee00
