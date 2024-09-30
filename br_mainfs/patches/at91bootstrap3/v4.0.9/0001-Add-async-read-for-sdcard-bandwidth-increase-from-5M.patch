@@ -1,0 +1,328 @@
+From c7a8289adcfc0f36a7654844f3443669baa6f1e3 Mon Sep 17 00:00:00 2001
+From: user <xing.chen@microchip.com>
+Date: Fri, 1 Sep 2023 11:29:33 +0800
+Subject: [PATCH 1/5] Add async read for sdcard, bandwidth increase from 5MB/s
+ to 20MB/s
+
+---
+ Makefile             |  4 +++
+ driver/Config.in.nvm | 16 ++++++++++
+ driver/driver_cpp.mk |  5 ++++
+ driver/mci_media.c   | 71 +++++++++++++++++++++++++++++++++++++++++++-
+ driver/sdhc.c        |  4 +--
+ fs/include/diskio.h  |  8 +++++
+ fs/include/ffconf.h  |  5 ++++
+ fs/include/media.h   |  4 +++
+ fs/src/diskio.c      | 25 ++++++++++++++++
+ fs/src/ff.c          | 14 +++++++++
+ include/sdhc.h       |  6 ++++
+ 11 files changed, 159 insertions(+), 3 deletions(-)
+
+diff --git a/Makefile b/Makefile
+index 6c469d37..7c5dbbbd 100644
+--- a/Makefile
++++ b/Makefile
+@@ -225,6 +225,10 @@ ifeq ($(IMAGE),)
+ IMAGE=$(BOOT_NAME).bin
+ endif
+ 
++ifeq ($(CONFIG_SDHC_ASYNC_READ), y)
++SDHC_ASYNC_READ_QUEUE_SIZE := $(strip $(subst ",,$(CONFIG_SDHC_ASYNC_READ_QUEUE_SIZE)))
++endif
++
+ COBJS-y:= main.o
+ SOBJS-y:= crt0_gnu.o
+ 
+diff --git a/driver/Config.in.nvm b/driver/Config.in.nvm
+index 5fa474b8..ca24598d 100644
+--- a/driver/Config.in.nvm
++++ b/driver/Config.in.nvm
+@@ -111,6 +111,22 @@ config SDHC_8BIT_SUPPORT
+ 	  will not configure SDHC lines 4-7 in SDHC mode, and they can be
+ 	  used for another interface.
+ 
++config SDHC_ASYNC_READ
++	bool "Use async read"
++	depends on SAM9X60 || SAMA5D2 || SAM9X7
++	depends on SDHC
++	default n
++	help
++	  Cache more block read requests for multiple-block reads.
++
++config SDHC_ASYNC_READ_QUEUE_SIZE
++	string "Async read queue size"
++	depends on SDHC_ASYNC_READ
++	default "64"
++	help
++	  Warning: this queue is stored in the stack,
++	           excessive size can cause a stack overflow.
++
+ config FATFS
+ 	bool
+ 	depends on SDCARD
+diff --git a/driver/driver_cpp.mk b/driver/driver_cpp.mk
+index eedf82d7..0d3b6f9f 100644
+--- a/driver/driver_cpp.mk
++++ b/driver/driver_cpp.mk
+@@ -214,3 +214,8 @@ endif
+ ifeq ($(CONFIG_WDTS), y)
+ CPPFLAGS += -DCONFIG_WDTS
+ endif
++
++ifeq ($(CONFIG_SDHC_ASYNC_READ),y)
++CPPFLAGS += -DCONFIG_SDHC_ASYNC_READ
++CPPFLAGS += -DSDHC_ASYNC_READ_QUEUE_SIZE=$(SDHC_ASYNC_READ_QUEUE_SIZE)
++endif
+diff --git a/driver/mci_media.c b/driver/mci_media.c
+index 2aa1c6f7..77f6c0b6 100644
+--- a/driver/mci_media.c
++++ b/driver/mci_media.c
+@@ -1242,7 +1242,6 @@ static int sd_cmd_read_single_block(struct sd_card *sdcard,
+ 	return 1;
+ }
+ 
+-#define SUPPORT_MAX_BLOCKS	16
+ unsigned int sdcard_block_read(unsigned int start,
+ 				unsigned int block_count,
+ 				void *buf)
+@@ -1292,3 +1291,73 @@ unsigned int sdcard_block_read(unsigned int start,
+ 
+ 	return block_count;
+ }
++
++#ifdef CONFIG_SDHC_ASYNC_READ
++#define F_INIT	0
++#define F_READ	1
++#define F_FLUSH	2
++unsigned int sdcard_block_read_async(unsigned int start,
++				unsigned int block_count,
++				void *buf,
++				int flag)
++{
++	static unsigned int c_count = 0, c_start = 0;
++	static void *c_buf = NULL;
++
++	struct sd_card *sdcard = &atmel_sdcard;
++	unsigned int bl_len = sdcard->read_bl_len;
++	int need_refresh = 0;
++	int i, count;
++
++	/* Initialize the read request queue. */
++	if (flag == F_INIT) {
++		c_count = 0;
++		c_start = 0;
++		c_buf = NULL;
++
++		return block_count;
++	}
++
++	if (flag == F_READ) {
++		if (!c_count) {
++			/* Cache this read request. */
++			c_count = block_count;
++			c_start = start;
++			c_buf = buf;
++
++			return block_count;
++		} else {
++			/* Read request can be cached. */
++			if ((start == c_start + c_count) &&
++			    (buf == c_buf + c_count * bl_len)) {
++				c_count += block_count;
++			} else {
++				/* Flush queue, cache current request */
++				need_refresh = 1;
++			}
++		}
++	}
++
++	if ((flag == F_FLUSH) || (c_count >= SUPPORT_MAX_BLOCKS) || need_refresh) {
++		/* Flush read request queue */
++		for (i = 0; i < (c_count - 1); i += count) {
++			count = (c_count > SUPPORT_MAX_BLOCKS) ? SUPPORT_MAX_BLOCKS : c_count;
++			if (sdcard_block_read(c_start + i, count, c_buf + i * bl_len) != count)
++				return 0;
++		}
++
++		c_count = 0;
++		c_start = 0;
++		c_buf = NULL;
++	}
++
++	if (need_refresh) {
++		/* Cache current read request */
++		c_count = block_count;
++		c_start = start;
++		c_buf   = buf;
++	}
++
++	return block_count;
++}
++#endif
+diff --git a/driver/sdhc.c b/driver/sdhc.c
+index 1497dcb3..3f7fee28 100644
+--- a/driver/sdhc.c
++++ b/driver/sdhc.c
+@@ -656,7 +656,7 @@ static int sdhc_send_command(struct sd_command *sd_cmd, struct sd_data *data)
+ 	unsigned int i;
+ 	int ret;
+ 	unsigned int timeout;
+-	struct adma_desc dma_desc[16] = {0};
++	struct adma_desc dma_desc[SUPPORT_MAX_BLOCKS] = {0};
+ 
+ 	timeout = 100000;
+ 	while ((--timeout) &&
+@@ -721,7 +721,7 @@ static int sdhc_send_command(struct sd_command *sd_cmd, struct sd_data *data)
+ 		if (sdhc_host.caps_adma2 && (sd_cmd->cmd == SD_CMD_READ_SINGLE_BLOCK ||
+ 		    sd_cmd->cmd == SD_CMD_READ_MULTIPLE_BLOCK)) {
+ 			/* prepare descriptor table */
+-			if (data->blocks > 16 )
++			if (data->blocks > SUPPORT_MAX_BLOCKS )
+ 				dbg_printf("too many blocks requested at once, error\n");
+ 
+ 			for (i = 0; i < data->blocks; i++) {
+diff --git a/fs/include/diskio.h b/fs/include/diskio.h
+index eef68c07..5075bc67 100644
+--- a/fs/include/diskio.h
++++ b/fs/include/diskio.h
+@@ -31,6 +31,14 @@ int assign_drives (int, int);
+ DSTATUS disk_initialize (BYTE);
+ DSTATUS disk_status (BYTE);
+ DRESULT disk_read (BYTE, BYTE*, DWORD, BYTE);
++
++#ifdef _USE_ASYNCREAD
++#define F_INIT  0
++#define F_READ  1
++#define F_FLUSH 2
++DRESULT disk_read_async (BYTE, BYTE*, DWORD, BYTE, DWORD);
++#endif
++
+ #if	_READONLY == 0
+ DRESULT disk_write (BYTE, const BYTE*, DWORD, BYTE);
+ #endif
+diff --git a/fs/include/ffconf.h b/fs/include/ffconf.h
+index bda6306e..d6216294 100644
+--- a/fs/include/ffconf.h
++++ b/fs/include/ffconf.h
+@@ -51,6 +51,11 @@
+ #define	_USE_FASTSEEK	0	/* 0:Disable or 1:Enable */
+ /* To enable fast seek feature, set _USE_FASTSEEK to 1. */
+ 
++#ifdef CONFIG_SDHC_ASYNC_READ
++#define _USE_ASYNCREAD	1	/* 0:Disable or 1:Enable */
++#else
++#define _USE_ASYNCREAD	0
++#endif
+ 
+ 
+ /*---------------------------------------------------------------------------/
+diff --git a/fs/include/media.h b/fs/include/media.h
+index f7f8d3f0..ca059087 100644
+--- a/fs/include/media.h
++++ b/fs/include/media.h
+@@ -32,5 +32,9 @@ extern int sdcard_initialize(void);
+ extern unsigned int sdcard_block_read(unsigned int start,
+ 					unsigned int blkcnt,
+ 					void *dest);
++extern unsigned int sdcard_block_read_async(unsigned int start,
++					unsigned int blkcnt,
++					void *dest,
++					int flag);
+ 
+ #endif
+diff --git a/fs/src/diskio.c b/fs/src/diskio.c
+index 591deb33..9b54ff3e 100644
+--- a/fs/src/diskio.c
++++ b/fs/src/diskio.c
+@@ -62,6 +62,31 @@ DRESULT disk_read(BYTE drv,     /* Physical drive number (0..) */
+ 		return RES_ERROR;
+ }
+ 
++/*-----------------------------------------------------------------------*/
++/* Read Sector(s) async                                                  */
++/*-----------------------------------------------------------------------*/
++
++#if _USE_ASYNCREAD == 1
++DRESULT disk_read_async(BYTE drv,     /* Physical drive number (0..) */
++                  BYTE *buff,  /* Data buffer to store read data */
++                  DWORD sector, /* Start sector number (LBA) */
++                  BYTE count,   /* Sector count (1..255) */
++                  DWORD flag
++    )
++{
++	if (drv || !count) return RES_PARERR;
++	if (Stat & STA_NOINIT) return RES_NOTRDY;
++
++	if (sdcard_block_read_async((unsigned int)sector,
++				(unsigned int)count,
++				(void *)buff,
++				(int)flag) == count)
++		return RES_OK;
++	else
++		return RES_ERROR;
++}
++#endif /* _USE_ASYNCREAD */
++
+ /*-----------------------------------------------------------------------*/
+ /* Write Sector(s)                                                       */
+ /*-----------------------------------------------------------------------*/
+diff --git a/fs/src/ff.c b/fs/src/ff.c
+index 80ff76fc..1fa6d765 100644
+--- a/fs/src/ff.c
++++ b/fs/src/ff.c
+@@ -2356,6 +2356,12 @@ FRESULT f_open (
+ 		fp->cltbl = 0;				/* Normal seek mode */
+ #endif
+ 		fp->fs = dj.fs; fp->id = dj.fs->id;	/* Validate file object */
++
++#if _USE_ASYNCREAD
++		/* Initialize async disk read */
++		if (disk_read_async(fp->fs->drv, (unsigned char *)0, 0, 1, F_INIT) != RES_OK)
++			ABORT(fp->fs, FR_DISK_ERR);
++#endif
+ 	}
+ 
+ 	LEAVE_FF(dj.fs, res);
+@@ -2418,7 +2424,11 @@ FRESULT f_read (
+ 			if (cc) {					/* Read maximum contiguous sectors directly */
+ 				if (csect + cc > fp->fs->csize)		/* Clip at cluster boundary */
+ 					cc = fp->fs->csize - csect;
++#if _USE_ASYNCREAD
++				if (disk_read_async(fp->fs->drv, rbuff, sect, (BYTE)cc, F_READ) != RES_OK)
++#else
+ 				if (disk_read(fp->fs->drv, rbuff, sect, (BYTE)cc) != RES_OK)
++#endif
+ 					ABORT(fp->fs, FR_DISK_ERR);
+ #if !_FS_READONLY && _FS_MINIMIZE <= 2			/* Replace one of the read sectors with cached data if it contains a dirty sector */
+ #if _FS_TINY
+@@ -2440,6 +2450,10 @@ FRESULT f_read (
+ 						ABORT(fp->fs, FR_DISK_ERR);
+ 					fp->flag &= ~FA__DIRTY;
+ 				}
++#endif
++#if _USE_ASYNCREAD
++				if (disk_read_async(fp->fs->drv, (unsigned char *)0, 0, 1, F_FLUSH) != RES_OK)
++					ABORT(fp->fs, FR_DISK_ERR);
+ #endif
+ 				if (disk_read(fp->fs->drv, fp->buf, sect, 1) != RES_OK)	/* Fill sector cache */
+ 					ABORT(fp->fs, FR_DISK_ERR);
+diff --git a/include/sdhc.h b/include/sdhc.h
+index 5ca6a36a..3ded412e 100644
+--- a/include/sdhc.h
++++ b/include/sdhc.h
+@@ -7,6 +7,12 @@
+ #ifndef __SDHC_H__
+ #define	__SDHC_H__
+ 
++#ifdef CONFIG_SDHC_ASYNC_READ
++#define SUPPORT_MAX_BLOCKS SDHC_ASYNC_READ_QUEUE_SIZE
++#else
++#define SUPPORT_MAX_BLOCKS 16
++#endif
++
+ int sdcard_register_sdhc(struct sd_card *sdcard);
+ 
+ struct adma_desc {
+-- 
+2.34.1
+

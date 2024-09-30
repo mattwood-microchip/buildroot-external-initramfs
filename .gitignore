@@ -6,6 +6,7 @@ host
 build
 staging
 buildroot-*
+.vscode
 .auto.deps
 .config.cmd
 .config.old

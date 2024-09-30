@@ -7,6 +7,9 @@ GENIMAGE_CFG="$2"
 cp "${BR2_EXTERNAL_INITRAMFS_PATH}"/images/zImage "${BINARIES_DIR}"/
 cp "${BR2_EXTERNAL_INITRAMFS_PATH}"/images/at91-sama5d29_curiosity.dtb "${BINARIES_DIR}"/
 
+# copy boot logo
+cp "${BR2_EXTERNAL_MAINFS_PATH}"/board/microchip/sama5d29_curiosity/logo.bmp "${BINARIES_DIR}"/
+
 # create sdcard.img
 support/scripts/genimage.sh -c "${GENIMAGE_CFG}"
 

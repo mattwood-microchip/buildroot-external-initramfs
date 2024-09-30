@@ -1,0 +1,1343 @@
+From 99b89e61b7358f616812e525f97b1cfa63f97d08 Mon Sep 17 00:00:00 2001
+From: user <xing.chen@microchip.com>
+Date: Tue, 27 Aug 2024 13:55:47 +0800
+Subject: [PATCH 5/5] Add xlcdc & lvdsc support for sam9x75 Verified on
+ sam9x75-ddr3-eb-rev3 with mpu32-eb-vlds-adapter-rev2 &
+ mpu32-lvds-display-wvga-rev3
+
+---
+ Kconfig                        |  31 +-
+ device/sam9x7/Config.in.device |   3 +
+ device/sam9x7/sam9x7.c         |  33 +++
+ device/sam9x7/sam9x7_board.h   |  42 +++
+ driver/Config.in.driver        |  12 +
+ driver/at91_lvdsc.c            | 146 ++++++++++
+ driver/at91_xlcdc.c            | 518 +++++++++++++++++++++++++++++++++
+ driver/driver.mk               |   2 +
+ include/arch/at91_lvdsc.h      |  66 +++++
+ include/arch/at91_pmc/pmc-v2.h |   1 +
+ include/arch/at91_xlcdc.h      | 320 ++++++++++++++++++++
+ include/board.h                |   1 +
+ include/lvdsc.h                |  12 +
+ 13 files changed, 1184 insertions(+), 3 deletions(-)
+ create mode 100644 driver/at91_lvdsc.c
+ create mode 100644 driver/at91_xlcdc.c
+ create mode 100755 include/arch/at91_lvdsc.h
+ create mode 100755 include/arch/at91_xlcdc.h
+ create mode 100755 include/lvdsc.h
+
+diff --git a/Kconfig b/Kconfig
+index 77ca4ea2..315e5b35 100644
+--- a/Kconfig
++++ b/Kconfig
+@@ -1138,10 +1138,35 @@ config LCDC_IOSET_1_24_BIT
+ 	depends on SAM9X60
+ 
+ endchoice
++
++config XLCDC
++	bool "XLCDC support"
++	depends on CPU_HAS_XLCDC
++	default n
++	help
++	  XLCDC support
++
++choice
++	prompt "XLCDC display interface"
++	depends on XLCDC
++	default LVDS if CPU_HAS_LVDSC
++	help
++	  Select the XLCDC display interface
++
++config LVDSC
++	bool "LVDS"
++	depends on CPU_HAS_LVDSC
++
++config MIPI_DSI
++	bool "MIPI-DSI"
++	depends on CPU_HAS_MIPI_DSI
++
++endchoice
++
+ endmenu
+ 
+ menu "Boot logo"
+-	depends on LCDC
++	depends on LCDC || XLCDC
+ 
+ config LOGO
+ 	bool "Display logo"
+@@ -1182,13 +1207,13 @@ config LOGO_RGBDEF
+ 	  Format is 0xRRGGBB
+ 
+ config LOGO_SCALE
+-	string "Scaling rate"
++	string "Scaling step"
+ 	depends on LOGO
+ 	default "0"
+ 	help
+ 	  Scale the logo if needed
+ 	  Only up scaling is supported
+-	  The step is 0.125 (1/8), 0 means no scaling
++	  One step is 0.125 (1/8), 0 means no scaling
+ 
+ config LOGO_BL
+ 	string "Backlight brightness"
+diff --git a/device/sam9x7/Config.in.device b/device/sam9x7/Config.in.device
+index ababf073..a7183204 100644
+--- a/device/sam9x7/Config.in.device
++++ b/device/sam9x7/Config.in.device
+@@ -28,6 +28,9 @@ config	SAM9X7
+ 	select CPU_HAS_FLEXCOM12
+ 	select CPU_HAS_QSPI_RICR_WICR
+ 	select CPU_HAS_DDRC
++	select CPU_HAS_XLCDC
++	select CPU_HAS_LVDSC
++	select CPU_HAS_MIPI_DSI
+ 	select ALLOW_CPU_CLK_800MHZ
+ 	select ALLOW_CRYSTAL_24_000MHZ
+ 	select SUPPORT_BUS_SPEED_266MHZ
+diff --git a/device/sam9x7/sam9x7.c b/device/sam9x7/sam9x7.c
+index 8e8d9aab..00d2f85f 100644
+--- a/device/sam9x7/sam9x7.c
++++ b/device/sam9x7/sam9x7.c
+@@ -472,3 +472,36 @@ void nandflash_set_smc_timing(unsigned int timing_mode)
+ 	nandflash_smc_conf(timing_mode, 2);
+ }
+ #endif /* #ifdef CONFIG_NANDFLASH */
++
++#ifdef CONFIG_XLCDC
++
++#define ATMEL_XLCDC_GCKDIV_VALUE     3
++
++void at91_xlcdc_hw_init(void)
++{
++	const struct pio_desc xlcdc_pins[] = {
++#ifdef BOARD_LCD_PIN_RST
++		{"LCDRST" , BOARD_LCD_PIN_RST , 1, PIO_DEFAULT, PIO_OUTPUT},
++#endif
++#ifdef BOARD_LCD_PIN_EN
++		{"LCDEN"  , BOARD_LCD_PIN_EN  , 1, PIO_DEFAULT, PIO_OUTPUT},
++#endif
++#ifdef BOARD_LCD_PIN_DISP
++		{"LCDDISP", BOARD_LCD_PIN_DISP, 1, PIO_DEFAULT, PIO_OUTPUT},
++#endif
++#ifdef BOARD_LCD_PIN_BL
++		{"LCDBL"  , BOARD_LCD_PIN_BL  , 0, PIO_DEFAULT, PIO_OUTPUT},
++#endif
++		{(char *)0, 0, 0, PIO_DEFAULT, PIO_PERIPH_A},
++	};
++
++	pio_configure(xlcdc_pins);
++	pmc_enable_periph_clock(CONFIG_SYS_ID_XLCDC, PMC_PERIPH_CLK_DIVIDER_NA);
++	pmc_enable_generic_clock(CONFIG_SYS_ID_XLCDC,
++				GCK_CSS_MCK_CLK,
++				ATMEL_XLCDC_GCKDIV_VALUE);
++#ifdef CONFIG_LVDSC
++	pmc_enable_periph_clock(CONFIG_SYS_ID_LVDSC, PMC_PERIPH_CLK_DIVIDER_NA);
++#endif
++}
++#endif /* #ifdef CONFIG_XLCDC */
+diff --git a/device/sam9x7/sam9x7_board.h b/device/sam9x7/sam9x7_board.h
+index 5c37b1b8..60f1da45 100644
+--- a/device/sam9x7/sam9x7_board.h
++++ b/device/sam9x7/sam9x7_board.h
+@@ -86,4 +86,46 @@
+ #define CONFIG_SYS_ID_XDMAC	AT91C_ID_XDMAC
+ #endif
+ 
++/*
++ * XLCDC Settings
++ */
++#ifdef CONFIG_XLCDC
++#define CONFIG_SYS_BASE_XLCDC	AT91C_BASE_XLCD
++#define CONFIG_SYS_ID_XLCDC	AT91C_ID_XLCDC
++
++#define BOARD_LCD_WIDTH		800
++#define BOARD_LCD_HEIGHT	480
++#define BOARD_LCD_FRAMERATE	60
++
++#define BOARD_LCD_TIMING_HFP	88
++#define BOARD_LCD_TIMING_HPW	5
++#define BOARD_LCD_TIMING_HBP	40
++#define BOARD_LCD_TIMING_VFP	23
++#define BOARD_LCD_TIMING_VPW	5
++#define BOARD_LCD_TIMING_VBP	1
++
++#define BOARD_LCD_PIXEL_CLOCK \
++((BOARD_LCD_WIDTH + BOARD_LCD_TIMING_HFP + BOARD_LCD_TIMING_HPW + BOARD_LCD_TIMING_HBP) * \
++(BOARD_LCD_HEIGHT + BOARD_LCD_TIMING_VFP + BOARD_LCD_TIMING_VPW + BOARD_LCD_TIMING_VBP) * \
++BOARD_LCD_FRAMERATE)
++
++/* LCD module control pins */
++#define BOARD_LCD_PIN_RST	AT91C_PIN_PC(25)
++#define BOARD_LCD_PIN_EN	AT91C_PIN_PA(14)
++#define BOARD_LCD_PIN_DISP	AT91C_PIN_PA(30)
++#define BOARD_LCD_PIN_BL	AT91C_PIN_PC(21)
++
++#ifdef CONFIG_LVDSC
++#define CONFIG_SYS_BASE_LVDSC	AT91C_BASE_LVDSC
++#define CONFIG_SYS_ID_LVDSC	AT91C_ID_LVDSC
++
++#define BOARD_LVDS_PLL_MUL 23
++#define BOARD_LVDS_PLL_DIV 2
++#define BOARD_LVDS_PLL_FRACR 3899392
++
++#define BOARD_LVDS_JEIDA
++#endif
++
++#endif
++
+ #endif /* __DEV_SAM9X7_H__ */
+diff --git a/driver/Config.in.driver b/driver/Config.in.driver
+index 7a0b01ec..e8e74ca1 100644
+--- a/driver/Config.in.driver
++++ b/driver/Config.in.driver
+@@ -130,6 +130,18 @@ config CPU_HAS_LCDC
+ 	bool
+ 	default n
+ 
++config CPU_HAS_XLCDC
++	bool
++	default n
++
++config CPU_HAS_LVDSC
++	bool
++	default n
++
++config CPU_HAS_MIPI_DSI
++	bool
++	default n
++
+ source "driver/Config.in.memory"
+ 
+ config MMU
+diff --git a/driver/at91_lvdsc.c b/driver/at91_lvdsc.c
+new file mode 100644
+index 00000000..a1e37545
+--- /dev/null
++++ b/driver/at91_lvdsc.c
+@@ -0,0 +1,146 @@
++// Copyright (C) 2024 Microchip Technology Inc. and its subsidiaries
++//
++// SPDX-License-Identifier: MIT
++
++#include "common.h"
++#include "hardware.h"
++#include "board.h"
++#include "string.h"
++#include "arch/at91_pmc/pmc.h"
++#include "arch/at91_lvdsc.h"
++#include "debug.h"
++#include "div.h"
++#include "pmc.h"
++
++#define COREPLLCK_MIN	600000000
++#define COREPLLCK_MAX	1200000000
++#define LVDSPLLCK_MIN	175000000
++#define LVDSPLLCK_MAX	550000000
++#define LVDSPLL_COUNT	0x3f
++#define PIXCK_DIV		7
++
++#define FRACR_ONE		(1 << 22)
++#define FRACR_STEP		128
++
++#define LVDSPLL_CLOCK (BOARD_LCD_PIXEL_CLOCK * PIXCK_DIV)
++#if (LVDSPLL_CLOCK < LVDSPLLCK_MIN) || (LVDSPLL_CLOCK > LVDSPLLCK_MAX)
++	#error "LVDSC: LVDS clock out of range!"
++#endif
++
++static unsigned int lvdsc_readl(unsigned int reg)
++{
++	return readl(CONFIG_SYS_BASE_LVDSC + reg);
++}
++
++static void lvdsc_writel(unsigned int reg, unsigned int value)
++{
++	writel(value, CONFIG_SYS_BASE_LVDSC + reg);
++}
++
++#if !defined(BOARD_LVDS_PLL_MUL) || \
++	!defined(BOARD_LVDS_PLL_DIV) || \
++	!defined(BOARD_LVDS_PLL_FRACR)
++static void pll_config(u32 *pll_mul, u32 *pll_div, u32 *pll_fracr)
++{
++	u32 core_clk, lvds_clk, real_clk;
++	u32 match = 0xffffffff;
++	u32 tmp;
++	int i, j;
++
++	for (i = 0; ;i++) {
++		core_clk = (i + 1) * BOARD_MAINOSC;
++
++		if ((core_clk >= COREPLLCK_MIN) && (core_clk <= COREPLLCK_MAX)) {
++			for (j = 0; ;j++) {
++				lvds_clk = div(core_clk, (j + 1));
++
++				if ((lvds_clk >= LVDSPLLCK_MIN) && (lvds_clk <= LVDSPLLCK_MAX)) {
++					if (lvds_clk > LVDSPLL_CLOCK) {
++						tmp = lvds_clk - LVDSPLL_CLOCK;
++					} else if (lvds_clk < LVDSPLL_CLOCK) {
++						tmp = LVDSPLL_CLOCK - lvds_clk;
++					} else {
++						*pll_mul = i;
++						*pll_div = j;
++						break;
++					}
++
++					if (tmp < match) {
++						match = tmp;
++						*pll_mul = i;
++						*pll_div = j;
++					}
++				} else if (lvds_clk < LVDSPLLCK_MIN) {
++					break;
++				}
++			}
++		} else if (core_clk > COREPLLCK_MAX) {
++			break;
++		}
++	}
++
++	core_clk = LVDSPLL_CLOCK * (*pll_div + 1);
++	real_clk = BOARD_MAINOSC * (*pll_mul + 1);
++	if (core_clk != real_clk) {
++		if (core_clk < real_clk) {
++			tmp = real_clk - core_clk;
++			tmp = BOARD_MAINOSC - tmp;
++			(*pll_mul)--;
++		} else {
++			tmp = core_clk - real_clk;
++		}
++
++		tmp = div(FRACR_STEP * tmp, BOARD_MAINOSC);
++		*pll_fracr = div(FRACR_ONE * tmp, FRACR_STEP);
++	}
++}
++#endif
++
++void lvdsc_start(void)
++{
++	struct pmc_pll_cfg pll_cfg;
++	u32 p_mul = 0, p_div = 0, fracr = 0;
++	u32 reg;
++
++#if !defined(BOARD_LVDS_PLL_MUL) || \
++	!defined(BOARD_LVDS_PLL_DIV) || \
++	!defined(BOARD_LVDS_PLL_FRACR)
++	pll_config(&p_mul, &p_div, &fracr);
++	dbg_info("#define BOARD_LVDS_PLL_MUL %d\n\r",p_mul);
++	dbg_info("#define BOARD_LVDS_PLL_DIV %d\n\r",p_div);
++	dbg_info("#define BOARD_LVDS_PLL_FRACR %d\n\r",fracr);
++#else
++	p_mul = BOARD_LVDS_PLL_MUL;
++	p_div = BOARD_LVDS_PLL_DIV;
++	fracr = BOARD_LVDS_PLL_FRACR;
++#endif
++	
++	/* Configure & Enable LVDSPLL */
++	pll_cfg.mul   = p_mul;
++	pll_cfg.div   = p_div;
++	pll_cfg.count = LVDSPLL_COUNT;
++	pll_cfg.fracr = fracr;
++	pll_cfg.acr  = AT91C_PLL_ACR_DEFAULT_LVDS;
++	pmc_sam9x60_cfg_pll(PLL_ID_LVDS, &pll_cfg);
++
++	lvdsc_writel(LVDSC_CR, 0);
++	while (lvdsc_readl(LVDSC_SR) & LVDSC_SR_CS);
++
++	reg = 0;
++#ifdef BOARD_LVDS_JEIDA
++	reg |= LVDSC_CFGR_MAPPING;
++#endif
++#ifdef BOARD_LVDS_BALANCED
++	ret |= LVDSC_CFGR_DC_BAL;
++#endif
++#ifdef BOARD_LVDS_DEN_LOW
++	ret |= LVDSC_CFGR_LCDC_DEN_POL;
++#endif
++#ifdef BOARD_LVDS_18BITS
++	ret |= LVDSC_CFGR_LCDC_PIXSIZE;
++#endif
++	lvdsc_writel(LVDSC_CFGR, reg);
++	lvdsc_writel(LVDSC_UCBR, 0);
++	lvdsc_writel(LVDSC_ACR, LVDSC_ACR_DCBIAS(9));
++	lvdsc_writel(LVDSC_CR, LVDSC_CR_SER_EN);
++}
+diff --git a/driver/at91_xlcdc.c b/driver/at91_xlcdc.c
+new file mode 100644
+index 00000000..0bb6ce1a
+--- /dev/null
++++ b/driver/at91_xlcdc.c
+@@ -0,0 +1,518 @@
++// Copyright (C) 2006 Microchip Technology Inc. and its subsidiaries
++//
++// SPDX-License-Identifier: MIT
++
++#include "common.h"
++#include "hardware.h"
++#include "board.h"
++#include "string.h"
++#include "arch/at91_pio.h"
++#include "arch/at91_xlcdc.h"
++#include "debug.h"
++#include "div.h"
++#include "pmc.h"
++#include "gpio.h"
++#include "timer.h"
++
++#ifdef CONFIG_LVDSC
++#include "lvdsc.h"
++#endif
++
++#define XLCDC_BMP_ADDR (LOGO_FB_ADDRESS + 16)
++
++#define BMP_LINE_ALIGN 4
++
++struct xlcdc_desc {
++	u16 width;     /**< Display image width */
++	u16 height;    /**< Display image height */
++	u16 framerate; /**< Frame rate in Hz */
++
++	u16 timing_vfp; /**< Vertical front porch in number of lines */
++	u16 timing_vbp; /**< Vertical back porch in number of lines */
++	u16 timing_vpw; /**< Vertical pulse width in number of lines */
++	u16 timing_hfp; /**< Horizontal front porch in LCDDOTCLK cycles */
++	u16 timing_hbp; /**< Horizontal back porch in LCDDOTCLK cycles */
++	u16 timing_hpw; /**< Horizontal pulse width in LCDDOTCLK cycles */
++
++	u16 ovr_mode;
++	u16 ovr_width;
++	u16 ovr_height;
++	u16 ovr_sc_width;
++	u16 ovr_sc_height;
++	u16 ovr_xpos;
++	u16 ovr_ypos;
++	u32 ovr_xstride;
++	u32 ovr_pstride;
++	u8 *ovr_buf;
++
++	u32 clut_size;
++
++	struct bmp_desc *bmp;
++};
++
++typedef enum {
++	BI_RGB       = 0x0000,
++	BI_RLE8      = 0x0001,
++	BI_RLE4      = 0x0002,
++	BI_BITFIELDS = 0x0003,
++	BI_JPEG      = 0x0004,
++	BI_PNG       = 0x0005,
++	BI_CMYK      = 0x000B,
++	BI_CMYKRLE8  = 0x000C,
++	BI_CMYKRLE4  = 0x000D
++} Compression;
++
++struct bit_fields {
++	u32 r_mask;
++	u32 g_mask;
++	u32 b_mask;
++} __attribute__ ((packed, aligned(1)));
++
++struct bmp_desc {
++	u8  bf_type[2];
++	u32 bf_size;
++	u16 bf_reserved1;
++	u16 bf_reserver2;
++	u32 bf_offbits;
++
++	u32 bi_size;
++	u32 bi_width;
++	u32 bi_height;
++	u16 bi_planes;
++	u16 bi_bitcount;
++	u32 bi_compression;
++	u32 bi_sizeimage;
++	u32 bi_xpelspermeter;
++	u32 bi_ypelspermeter;
++	u32 bi_clrused;
++	u32 bi_clrimportant;
++	u32 clut[];
++} __attribute__ ((packed, aligned(1)));
++
++static struct xlcdc_desc xlcdc = {
++	.width       = BOARD_LCD_WIDTH,
++	.height      = BOARD_LCD_HEIGHT,
++	.framerate   = BOARD_LCD_FRAMERATE,
++	.timing_vfp  = BOARD_LCD_TIMING_VFP,
++	.timing_vbp  = BOARD_LCD_TIMING_VBP,
++	.timing_vpw  = BOARD_LCD_TIMING_VPW,
++	.timing_hfp  = BOARD_LCD_TIMING_HFP,
++	.timing_hbp  = BOARD_LCD_TIMING_HBP,
++	.timing_hpw  = BOARD_LCD_TIMING_HPW,
++
++	.bmp         = (struct bmp_desc *)(XLCDC_BMP_ADDR),
++};
++
++static unsigned char lookup_table[16] = {
++	0x0, 0x8, 0x4, 0xc,
++	0x2, 0xa, 0x6, 0xe,
++	0x1, 0x9, 0x5, 0xd,
++	0x3, 0xb, 0x7, 0xf,
++};
++
++static inline unsigned char reverse_bit(unsigned char c)
++{
++	return (lookup_table[c & 0xf] << 4) | lookup_table[c >> 4];
++}
++
++static inline unsigned char reverse_4bit(unsigned char c)
++{
++	return (c >> 4) | (c << 4);
++}
++
++static inline unsigned int xlcdc_get_clock(void)
++{
++#if defined(CONFIG_SAM9X7)
++	return pmc_get_generic_clock(CONFIG_SYS_ID_XLCDC);
++#else
++	#error "XLCDC: Could NOT get source clock!"
++#endif
++}
++
++static unsigned int xlcdc_readl(unsigned int reg)
++{
++	return readl(CONFIG_SYS_BASE_XLCDC + reg);
++}
++
++static void xlcdc_writel(unsigned int reg, unsigned int value)
++{
++	writel(value, CONFIG_SYS_BASE_XLCDC + reg);
++}
++
++static inline void wait_lcdsr_equal(u32 mask)
++{
++	while (xlcdc_readl(LCDC_SR) & mask);
++}
++
++static inline void wait_lcdsr_nonequal(u32 mask)
++{
++	while (!(xlcdc_readl(LCDC_SR) & mask));
++}
++
++static inline void wait_attrs_equal(u32 mask)
++{
++	while (xlcdc_readl(LCDC_ATTRS) & mask);
++}
++
++static inline void wait_attrs_nonequal(u32 mask)
++{
++	while (!(xlcdc_readl(LCDC_ATTRS) & mask));
++}
++
++static void set_clut(u32 reg_base, const u8 *clut, u16 size)
++{
++	u32 i;
++
++	for (i = 0; i < size*4; i += 4)
++		xlcdc_writel(reg_base + i, clut[i] | clut[i+1]<<8 | clut[i+2]<<16);
++}
++
++static u32 get_factor(u32 srcsize, u32 dstsize)
++{
++	return div((u32)((1 << 20) * srcsize), dstsize);
++}
++
++#ifndef CONFIG_LVDSC
++static u32 clock_div(void)
++{
++	u32 clk_div, remainder;
++
++	division(xlcdc_get_clock(), BOARD_LCD_PIXEL_CLOCK, (unsigned int *)&clk_div,
++				(unsigned int *)&remainder);
++	if (remainder > (BOARD_LCD_PIXEL_CLOCK / 2))
++		clk_div++;
++
++	return clk_div;
++}
++#endif
++
++static void xlcdc_set_backlight(u8 level)
++{
++#ifndef BOARD_LCD_PIN_BL
++	u32 cfg = xlcdc_readl(LCDC_CFG(6)) & ~LCDC_CFG6_PWMCVAL_MASK;
++	xlcdc_writel(LCDC_CFG(6), cfg | LCDC_CFG6_PWMCVAL(level));
++#else
++	pio_set_gpio_output(BOARD_LCD_PIN_BL, level ? 1 : 0);
++#endif
++}
++
++static void xlcdc_stop(void)
++{
++#ifndef BOARD_LCD_PIN_BL
++	xlcdc_writel(LCDC_DIS, LCDC_DIS_PWMDIS);
++	wait_lcdsr_equal(LCDC_SR_SIPSTS);
++	wait_lcdsr_equal(LCDC_SR_PWMSTS);
++#endif
++
++#ifdef CONFIG_MIPI_DSI
++	xlcdc_writel(LCDC_DIS, LCDC_DIS_CMDIS);
++	wait_lcdsr_equal(LCDC_SR_SIPSTS);
++	wait_lcdsr_equal(LCDC_SR_CMSTS);
++#endif
++
++	xlcdc_writel(LCDC_DIS, LCDC_DIS_SDDIS);
++	wait_lcdsr_equal(LCDC_SR_SIPSTS);
++	wait_lcdsr_nonequal(LCDC_SR_SDSTS);
++
++	xlcdc_writel(LCDC_DIS, LCDC_DIS_DISPDIS);
++	wait_lcdsr_equal(LCDC_SR_SIPSTS);
++	wait_lcdsr_equal(LCDC_SR_DISPSTS);
++
++	xlcdc_writel(LCDC_DIS, LCDC_DIS_SYNCDIS);
++	wait_lcdsr_equal(LCDC_SR_SIPSTS);
++	wait_lcdsr_equal(LCDC_SR_LCDSTS);
++
++	xlcdc_writel(LCDC_DIS, LCDC_DIS_CLKDIS);
++	wait_lcdsr_equal(LCDC_SR_SIPSTS);
++	wait_lcdsr_equal(LCDC_SR_CLKSTS);
++}
++
++static void xlcdc_start(void)
++{
++#ifdef CONFIG_LVDSC
++	xlcdc_writel(LCDC_CFG(0), LCDC_CFG0_CLKPWMSEL |
++				 LCDC_CFG0_CLKBYP |
++				 LCDC_CFG0_CLKPOL);
++#else
++	xlcdc_writel(LCDC_CFG(0), LCDC_CFG0_CLKDIV(clock_div()) |
++				 LCDC_CFG0_CLKPWMSEL |
++				 LCDC_CFG0_CLKPOL);
++#endif
++	wait_lcdsr_equal(LCDC_SR_SIPSTS);
++
++	xlcdc_writel(LCDC_CFG(1), LCDC_CFG1_VSPW(xlcdc.timing_vpw - 1) |
++				 LCDC_CFG1_HSPW(xlcdc.timing_hpw - 1));
++	wait_lcdsr_equal(LCDC_SR_SIPSTS);
++
++	xlcdc_writel(LCDC_CFG(2), LCDC_CFG2_VBPW(xlcdc.timing_vbp - 1) |
++				 LCDC_CFG2_VFPW(xlcdc.timing_vfp - 1));
++	wait_lcdsr_equal(LCDC_SR_SIPSTS);
++
++	xlcdc_writel(LCDC_CFG(3), LCDC_CFG3_HBPW(xlcdc.timing_hbp - 1) |
++				 LCDC_CFG3_HFPW(xlcdc.timing_hfp - 1));
++	wait_lcdsr_equal(LCDC_SR_SIPSTS);
++
++	xlcdc_writel(LCDC_CFG(4), LCDC_CFG4_RPF(xlcdc.height - 1) |
++				 LCDC_CFG4_PPL(xlcdc.width - 1));
++	wait_lcdsr_equal(LCDC_SR_SIPSTS);
++
++	xlcdc_writel(LCDC_CFG(5), LCDC_CFG5_GUARDTIME(0) |
++				 LCDC_CFG5_DPI |
++				 LCDC_CFG5_MODE_OUTPUT_DPI_24BPP |
++				 LCDC_CFG5_DISPDLY |
++				 LCDC_CFG5_VSPDLYS |
++				 LCDC_CFG5_VSPOL |
++				 LCDC_CFG5_HSPOL);
++	wait_lcdsr_equal(LCDC_SR_SIPSTS);
++
++#ifndef BOARD_LCD_PIN_BL
++	xlcdc_writel(LCDC_CFG(6), LCDC_CFG6_PWMCVAL(0) |
++				 LCDC_CFG6_PWMPOL |
++				 LCDC_CFG6_PWMPS(6));
++	wait_lcdsr_equal(LCDC_SR_SIPSTS);
++#endif
++
++	xlcdc_writel(LCDC_EN, LCDC_EN_CLKEN);
++	wait_lcdsr_equal(LCDC_SR_SIPSTS);
++	wait_lcdsr_nonequal(LCDC_SR_CLKSTS);
++
++	xlcdc_writel(LCDC_EN, LCDC_EN_SYNCEN);
++	wait_lcdsr_equal(LCDC_SR_SIPSTS);
++	wait_lcdsr_nonequal(LCDC_SR_LCDSTS);
++
++	xlcdc_writel(LCDC_EN, LCDC_EN_DISPEN);
++	wait_lcdsr_equal(LCDC_SR_SIPSTS);
++	wait_lcdsr_nonequal(LCDC_SR_DISPSTS);
++
++	xlcdc_writel(LCDC_EN, LCDC_EN_SDEN);
++	wait_lcdsr_equal(LCDC_SR_SIPSTS);
++	wait_lcdsr_equal(LCDC_SR_SDSTS);
++
++#ifdef CONFIG_MIPI_DSI
++	xlcdc_writel(LCDC_EN, LCDC_EN_CMEN);
++	wait_lcdsr_equal(LCDC_SR_SIPSTS);
++	wait_lcdsr_nonequal(LCDC_SR_CMSTS);
++#endif
++
++#ifndef BOARD_LCD_PIN_BL
++	xlcdc_writel(LCDC_EN, LCDC_EN_PWMEN);
++	wait_lcdsr_equal(LCDC_SR_SIPSTS);
++	wait_lcdsr_nonequal(LCDC_SR_PWMSTS);
++#endif
++}
++
++void xlcdc_show_base(void)
++{
++	xlcdc_writel(LCDC_BASECFG(1), LAYER_RGB_888_PACKED);
++	xlcdc_writel(LCDC_BASECFG(3), LAYER_RGB(LOGO_RGBDEF));
++	xlcdc_writel(LCDC_BASECFG(4), 0);
++	xlcdc_writel(LCDC_BASEEN, LAYER_ENABLE);
++	xlcdc_writel(LCDC_ATTRE, LCDC_ATTR_BASE);
++	wait_attrs_equal(LCDC_ATTR_SIP);
++}
++
++void xlcdc_show_heo(void)
++{
++	u32 xfactor, yfactor;
++
++	/* Base configuration */
++	xlcdc_writel(LCDC_HEOCFG(0), LAYER_BLEN(4) |
++								LAYER_BLENCC(1));
++	xlcdc_writel(LCDC_HEOCFG(1), xlcdc.ovr_mode);
++	xlcdc_writel(LCDC_HEOCFG(2), LAYER_POS(xlcdc.ovr_xpos, xlcdc.ovr_ypos));
++	xlcdc_writel(LCDC_HEOCFG(3), LAYER_SIZE(xlcdc.ovr_sc_width, xlcdc.ovr_sc_height));
++	xlcdc_writel(LCDC_HEOCFG(4), LAYER_SIZE(xlcdc.ovr_width, xlcdc.ovr_height));
++	if (xlcdc.ovr_xstride)
++		xlcdc_writel(LCDC_HEOCFG(5), LAYER_STRIDE(xlcdc.ovr_xstride));
++	if (xlcdc.ovr_pstride)
++		xlcdc_writel(LCDC_HEOCFG(6), LAYER_STRIDE(xlcdc.ovr_pstride));
++	xlcdc_writel(LCDC_HEOCFG(9), LAYER_RGB(LOGO_RGBDEF));
++
++	/* Configure CULT if needed */
++	if (xlcdc.ovr_mode | LAYER_CLUTEN)
++		set_clut(LCDC_HEOCLUT(0), (u8 *)xlcdc.bmp->clut, xlcdc.clut_size);
++
++	/* Configure scaler if needed */
++	if (xlcdc.ovr_sc_width >= xlcdc.ovr_width) {
++		xfactor = get_factor(xlcdc.ovr_width, xlcdc.ovr_sc_width);
++		yfactor = get_factor(xlcdc.ovr_height, xlcdc.ovr_sc_height);
++
++		xlcdc_writel(LCDC_HEOCFG(23),
++					LAYER_HXSCEN | LAYER_HXSYEN |
++					LAYER_VXSCEN | LAYER_VXSYEN);
++		xlcdc_writel(LCDC_HEOCFG(24), yfactor);
++		xlcdc_writel(LCDC_HEOCFG(25), yfactor);
++		xlcdc_writel(LCDC_HEOCFG(26), xfactor);
++		xlcdc_writel(LCDC_HEOCFG(27), xfactor);
++		xlcdc_writel(LCDC_HEOCFG(28), 0);
++		xlcdc_writel(LCDC_HEOCFG(29), 0);
++		xlcdc_writel(LCDC_HEOCFG(30),
++					LAYER_VXSCBICU | LAYER_VXSCCFG(1) |
++					LAYER_VXSYBICU | LAYER_VXSYCFG(1));
++		xlcdc_writel(LCDC_HEOCFG(31),
++					LAYER_HXSCBICU | LAYER_HXSCCFG(1) |
++					LAYER_HXSYBICU | LAYER_HXSYCFG(1));
++	}
++
++	xlcdc_writel(LCDC_HEOYFBA(0), LAYER_FBA((u32)xlcdc.ovr_buf));
++	xlcdc_writel(LCDC_HEOCFG(12), LAYER_DMA);
++
++	xlcdc_writel(LCDC_HEOEN, LAYER_ENABLE);
++	xlcdc_writel(LCDC_ATTRE, LCDC_ATTR_HEO);
++	wait_attrs_equal(LCDC_ATTR_SIP);
++}
++
++void lcdc_init(void)
++{
++	/* Invalidate bmp struct buffer */
++	xlcdc.bmp->bf_type[0] = 0;
++	xlcdc.bmp->bf_type[1] = 0;
++
++	at91_xlcdc_hw_init();
++#ifdef CONFIG_LVDSC
++	lvdsc_start();
++#endif
++	xlcdc_stop();
++	xlcdc_start();
++	xlcdc_show_base();
++}
++
++int lcdc_display(void)
++{
++	u32 i;
++	u32 line_bytes;
++	u8 line_padding;
++	struct bit_fields *bf = NULL;
++
++	if ((xlcdc.bmp->bf_type[0] != 'B') || (xlcdc.bmp->bf_type[1] != 'M')) {
++		dbg_info("XLCDC: bmp file not found\n\r");
++		return -1;
++	}
++
++	switch (xlcdc.bmp->bi_bitcount) {
++	case 32:
++		line_bytes = xlcdc.bmp->bi_width * 4;
++
++		if (xlcdc.bmp->bi_compression == BI_RGB) {
++			xlcdc.ovr_mode = LAYER_ARGB_8888;
++		} else if (xlcdc.bmp->bi_compression == BI_BITFIELDS) {
++			bf = (struct bit_fields *)&xlcdc.bmp->clut;
++
++			if ((bf->r_mask == 0xff0000) && (bf->g_mask == 0xff00) && (bf->b_mask == 0xff))
++				xlcdc.ovr_mode = LAYER_ARGB_8888;
++			else
++				goto UNSUPPORTED;
++		}
++		break;
++
++	case 24:
++		line_bytes = xlcdc.bmp->bi_width * 3;
++		xlcdc.ovr_mode = LAYER_RGB_888_PACKED;
++		break;
++
++	case 16:
++		line_bytes = xlcdc.bmp->bi_width * 2;
++
++		if (xlcdc.bmp->bi_compression == BI_RGB) {
++			xlcdc.ovr_mode = LAYER_ARGB_1555;
++		} else if (xlcdc.bmp->bi_compression == BI_BITFIELDS) {
++			bf = (struct bit_fields *)&xlcdc.bmp->clut;
++
++			if ((bf->r_mask == 0x7c00) && (bf->g_mask == 0x03e0) && (bf->b_mask == 0x001f))
++				xlcdc.ovr_mode = LAYER_ARGB_1555;
++			else if ((bf->r_mask == 0xf800) && (bf->g_mask == 0x07e0) && (bf->b_mask == 0x001f))
++				xlcdc.ovr_mode = LAYER_RGB_565;
++			else
++				goto UNSUPPORTED;
++		} else {
++			goto UNSUPPORTED;
++		}
++		break;
++
++	case 8:
++		line_bytes = xlcdc.bmp->bi_width * 1;
++		xlcdc.ovr_mode  = LAYER_CLUT_8BPP | LAYER_CLUTEN;
++		xlcdc.clut_size = 256;
++		break;
++
++	case 4:
++		line_bytes = xlcdc.bmp->bi_width / 2;
++		if (xlcdc.bmp->bi_width & 0x1) {
++			line_bytes++;
++			dbg_info("XLCDC: ERROR logo width %d is not 2 pixels aligned\n", xlcdc.bmp->bi_width);
++		}
++		xlcdc.ovr_mode = LAYER_CLUT_4BPP | LAYER_CLUTEN;
++		xlcdc.clut_size = 16;
++		break;
++
++	case 1:
++		line_bytes = xlcdc.bmp->bi_width / 8;
++		if (xlcdc.bmp->bi_width & 0x7) {
++			line_bytes++;
++			dbg_info("XLCDC: ERROR logo width %d is not 8 pixels aligned\n", xlcdc.bmp->bi_width);
++		}
++		xlcdc.ovr_mode = LAYER_CLUT_1BPP | LAYER_CLUTEN;
++		xlcdc.clut_size = 2;
++		break;
++
++	default:
++UNSUPPORTED:
++		dbg_info("XLCDC: unsupported bmp format, bitcount=%d compression=%x\n\r",
++					xlcdc.bmp->bi_bitcount, xlcdc.bmp->bi_compression);
++		if ((xlcdc.bmp->bi_compression == BI_BITFIELDS) && bf) {
++			dbg_info("XLCDC: r_mask=%x, g_mask=%x, b_mask=%x\n\r",
++						bf->r_mask, bf->g_mask, bf->b_mask);
++		}
++		return -1;
++	}
++
++	line_padding = line_bytes & (BMP_LINE_ALIGN - 1);
++	if (line_padding)
++		line_padding = BMP_LINE_ALIGN - line_padding;
++
++	xlcdc.ovr_buf    = (u8 *)(XLCDC_BMP_ADDR + xlcdc.bmp->bf_offbits);
++	xlcdc.ovr_width  = xlcdc.bmp->bi_width;
++
++	if ((xlcdc.bmp->bi_bitcount == 1) || (xlcdc.bmp->bi_bitcount == 4)) {
++		u32 lines = (int)xlcdc.bmp->bi_height >= 0 ? xlcdc.bmp->bi_height : -xlcdc.bmp->bi_height;
++
++		for (i = 0; i < ((line_bytes + line_padding) * lines); i++) {
++				if (xlcdc.bmp->bi_bitcount == 1)
++					xlcdc.ovr_buf[i] = reverse_bit(xlcdc.ovr_buf[i]);
++				else if (xlcdc.bmp->bi_bitcount == 4)
++					xlcdc.ovr_buf[i] = reverse_4bit(xlcdc.ovr_buf[i]);
++		}
++	}
++
++	if (((int)xlcdc.bmp->bi_height) > 0) {
++		xlcdc.ovr_height  = xlcdc.bmp->bi_height;
++		xlcdc.ovr_xstride = -(line_bytes * 2 + line_padding);
++		xlcdc.ovr_buf     += (line_bytes + line_padding) * (xlcdc.ovr_height - 1);
++	} else {
++		xlcdc.ovr_height  = -xlcdc.bmp->bi_height;
++		xlcdc.ovr_xstride = line_padding;
++	}
++
++	xlcdc.ovr_sc_width  = (LOGO_SCALE == 0) ? xlcdc.ovr_width : (xlcdc.ovr_width * (8 + LOGO_SCALE) / 8);
++	xlcdc.ovr_sc_height = (LOGO_SCALE == 0) ? xlcdc.ovr_height : (xlcdc.ovr_height * (8 + LOGO_SCALE) / 8);
++	xlcdc.ovr_xpos      = (xlcdc.ovr_sc_width >= xlcdc.width) ? 0 : ((xlcdc.width - xlcdc.ovr_sc_width) / 2);
++	xlcdc.ovr_ypos      = (xlcdc.ovr_sc_height >= xlcdc.height) ? 0 : ((xlcdc.height - xlcdc.ovr_sc_height) / 2);
++
++	xlcdc_show_heo();
++	if (LOGO_BL_DELAY)
++		mdelay(LOGO_BL_DELAY);
++	xlcdc_set_backlight(LOGO_BL);
++
++	return 0;
++}
++
++int bmp_size(void *p)
++{
++	struct bmp_desc *bmp = p;
++
++	if ((bmp->bf_type[0] == 'B') && (bmp->bf_type[1] == 'M')) {
++		return bmp->bf_size;
++	}
++
++	return 0;
++}
+diff --git a/driver/driver.mk b/driver/driver.mk
+index 84a41809..f2efd56c 100644
+--- a/driver/driver.mk
++++ b/driver/driver.mk
+@@ -115,3 +115,5 @@ COBJS-$(CONFIG_CACHES)		+= $(DRIVERS_SRC)/l1cache.o
+ COBJS-$(CONFIG_MMU)		+= $(DRIVERS_SRC)/mmu.o
+ COBJS-$(CONFIG_XDMAC)	+= $(DRIVERS_SRC)/at91_xdmac.o
+ COBJS-$(CONFIG_LCDC)		+= $(DRIVERS_SRC)/at91_lcdc.o
++COBJS-$(CONFIG_XLCDC)		+= $(DRIVERS_SRC)/at91_xlcdc.o
++COBJS-$(CONFIG_LVDSC)		+= $(DRIVERS_SRC)/at91_lvdsc.o
+diff --git a/include/arch/at91_lvdsc.h b/include/arch/at91_lvdsc.h
+new file mode 100755
+index 00000000..543d23db
+--- /dev/null
++++ b/include/arch/at91_lvdsc.h
+@@ -0,0 +1,66 @@
++/*
++ * Copyright (C) 2013 Microchip Technology Inc. and its subsidiaries
++ *
++ * SPDX-License-Identifier: MIT
++ */
++
++#ifndef	__AT91_LVDSC_H__
++#define	__AT91_LVDSC_H__
++
++/*
++ * Register Definitions
++ */
++#define LVDSC_CR	0x00
++#define LVDSC_CFGR	0x04
++#define LVDSC_UCBR	0x08
++#define LVDSC_SR	0x0C
++#define LVDSC_ACR	0x14
++#define LVDSC_WPMR	0xE4
++#define LVDSC_WPSR	0xE8
++
++/*
++ * Register Field Definitions
++ */
++/* LVDSC_CR */
++#define LVDSC_CR_SER_EN	(0x1 << 0)
++
++/* LVDSC_CFGR */
++#define LVDSC_CFGR_LCDC_PIXSIZE	(0x1 << 0)
++#define LVDSC_CFGR_LCDC_DEN_POL	(0x1 << 1)
++#define LVDSC_CFGR_DC_BAL		(0x1 << 5)
++#define LVDSC_CFGR_MAPPING		(0x1 << 6)
++
++/* LVDSC_UCBR */
++#define LVDSC_UCBR_RESA3	(0x1 << 2)
++
++/* LVDSC_SR */
++#define LVDSC_SR_CS	(0x1 << 0)
++
++/* LVDSC_ACR */
++#define LVDSC_ACR_DCBIAS_MASK		(0x1f << 0)
++#define LVDSC_ACR_DCBIAS(x)			(((x) << 0) & LVDSC_ACR_DCBIAS_MASK)
++#define LVDSC_ACR_PREEMP_A0_MASK	(0x7 << 8)
++#define LVDSC_ACR_PREEMP_A0(x)		(((x) << 8) & LVDSC_ACR_PREEMP_A0_MASK)
++#define LVDSC_ACR_PREEMP_A1_MASK	(0x7 << 12)
++#define LVDSC_ACR_PREEMP_A1(x)		(((x) << 12) & LVDSC_ACR_PREEMP_A1_MASK)
++#define LVDSC_ACR_PREEMP_A2_MASK	(0x7 << 16)
++#define LVDSC_ACR_PREEMP_A2(x)		(((x) << 16) & LVDSC_ACR_PREEMP_A2_MASK)
++#define LVDSC_ACR_PREEMP_A3_MASK	(0x7 << 20)
++#define LVDSC_ACR_PREEMP_A3(x)		(((x) << 20) & LVDSC_ACR_PREEMP_A3_MASK)
++#define LVDSC_ACR_PREEMP_CLK1_MASK	(0x7 << 24)
++#define LVDSC_ACR_PREEMP_CLK1(x)	(((x) << 24) & LVDSC_ACR_PREEMP_CLK1_MASK)
++
++/* LVDSC_WPMR */
++#define LVDSC_WPMR_WPEN		(0x1 << 0)
++#define LVDSC_WPMR_LCKWPEN	(0x1 << 4)
++#define LVDSC_WPMR_WPKEY	(0x4C5644 << 8)
++
++/* LVDSC_WPSR */
++#define LVDSC_WPSR_WPVS					(0x1 << 0)
++#define LVDSC_WPSR_SWE					(0x1 << 3)
++#define LVDSC_WPSR_WPVSRC_MASK			(0xffff << 8)
++#define LVDSC_WPSR_SWETYP_WRITE_RO		(0x1 << 24)
++#define LVDSC_WPSR_SWETYP_UNDEF_RW		(0x2 << 24)
++#define LVDSC_WPSR_SWETYP_WEIRD_ACTION	(0x3 << 24)
++
++#endif	/* #ifndef __AT91_LVDSC_H__ */
+diff --git a/include/arch/at91_pmc/pmc-v2.h b/include/arch/at91_pmc/pmc-v2.h
+index f7345d8b..b9be8c17 100644
+--- a/include/arch/at91_pmc/pmc-v2.h
++++ b/include/arch/at91_pmc/pmc-v2.h
+@@ -41,6 +41,7 @@
+ #define		AT91C_PLL_ACR_LOOP_FILTER_(x)	((x) << 24)
+ #define AT91C_PLL_ACR_DEFAULT_UTMI	0x12020010UL
+ #define AT91C_PLL_ACR_DEFAULT_PLLA	0x20010UL
++#define AT91C_PLL_ACR_DEFAULT_LVDS	0x12023010UL
+ 
+ #define PMC_PLL_UPDT		0x1c		/* PLL Update Register */
+ #define AT91C_PLL_UPDT_ID	(0xFUL << 0)
+diff --git a/include/arch/at91_xlcdc.h b/include/arch/at91_xlcdc.h
+new file mode 100755
+index 00000000..78d8cb47
+--- /dev/null
++++ b/include/arch/at91_xlcdc.h
+@@ -0,0 +1,320 @@
++/*
++ * Copyright (C) 2013 Microchip Technology Inc. and its subsidiaries
++ *
++ * SPDX-License-Identifier: MIT
++ */
++
++#ifndef	__AT91_XLCDC_H__
++#define	__AT91_XLCDC_H__
++
++/*
++ * Register Definitions
++ */
++#define LCDC_CFG(i)	((i) * 0x4)
++#define LCDC_EN		0x20
++#define LCDC_DIS	0x24
++#define LCDC_SR		0x28
++#define LCDC_IER	0x2c
++#define LCDC_IDR	0x30
++#define LCDC_IMR	0x34
++#define LCDC_ISR	0x38
++#define LCDC_ATTRE	0x3C
++#define LCDC_ATTRS	0x40
++
++#ifdef CONFIG_SAM9X7
++#define LCDC_BASE_BASE	0x60
++#endif
++#define LCDC_BASEIER	(LCDC_BASE_BASE)
++#define LCDC_BASEIDR	(LCDC_BASE_BASE + 0x04)
++#define LCDC_BASEIMR	(LCDC_BASE_BASE + 0x08)
++#define LCDC_BASEISR	(LCDC_BASE_BASE + 0x0C)
++#define LCDC_BASEEN		(LCDC_BASE_BASE + 0x10)
++#define LCDC_BASECLA	(LCDC_BASE_BASE + 0x14)
++#define LCDC_BASEFBA	(LCDC_BASE_BASE + 0x18)
++#define LCDC_BASECFG(i)	(LCDC_BASE_BASE + 0x1C + ((i) * 0x4))
++
++#define LCDC_WPMR	0xE4
++#define LCDC_WPSR	0xE8
++
++#ifdef CONFIG_SAM9X7
++#define LCDC_OVR1_BASE	0x160
++#endif
++#define LCDC_OVR1IER	(LCDC_OVR1_BASE)
++#define LCDC_OVR1IDR	(LCDC_OVR1_BASE + 0x04)
++#define LCDC_OVR1IMR	(LCDC_OVR1_BASE + 0x08)
++#define LCDC_OVR1ISR	(LCDC_OVR1_BASE + 0x0C)
++#define LCDC_OVR1EN		(LCDC_OVR1_BASE + 0x10)
++#define LCDC_OVR1CLA	(LCDC_OVR1_BASE + 0x14)
++#define LCDC_OVR1FBA	(LCDC_OVR1_BASE + 0x18)
++#define LCDC_OVR1CFG(i)	(LCDC_OVR1_BASE + 0x1C + ((i) * 0x4))
++
++#ifdef CONFIG_SAM9X7
++#define LCDC_HEO_BASE	0x360
++#endif
++#define LCDC_HEOIER		(LCDC_HEO_BASE)
++#define LCDC_HEOIDR		(LCDC_HEO_BASE + 0x04)
++#define LCDC_HEOIMR		(LCDC_HEO_BASE + 0x08)
++#define LCDC_HEOISR		(LCDC_HEO_BASE + 0x0C)
++#define LCDC_HEOEN		(LCDC_HEO_BASE + 0x10)
++#define LCDC_HEOCLA		(LCDC_HEO_BASE + 0x14)
++#define LCDC_HEOYFBA(i)		(LCDC_HEO_BASE + 0x18 + ((i*3) * 0x4))
++#define LCDC_HEOCBFBA(i)	(LCDC_HEO_BASE + 0x18 + ((i) * 0x4))
++#define LCDC_HEOCRFBA(i)	(LCDC_HEO_BASE + 0x18 + ((i) * 0x4))
++#define LCDC_HEOCFG(i)		(LCDC_HEO_BASE + 0x30 + ((i) * 0x4))
++#define LCDC_HEOVTAP10P(i)	(LCDC_HEO_BASE + 0xB0 + ((i) * 0x8))
++#define LCDC_HEOVTAP32P(i)	(LCDC_HEO_BASE + 0xB4 + ((i) * 0x8))
++#define LCDC_HEOHTAP10P(i)	(LCDC_HEO_BASE + 0x130 + ((i) * 0x8))
++#define LCDC_HEOHTAP32P(i)	(LCDC_HEO_BASE + 0x134 + ((i) * 0x8))
++
++#define LCDC_BASECLUT(i)	(0x700 + ((i) * 0x4))
++#define LCDC_OVR1CLUT(i)	(0xB00 + ((i) * 0x4))
++#define LCDC_OVR2CLUT(i)	(0xF00 + ((i) * 0x4))
++#define LCDC_HEOCLUT(i)		(0x1300 + ((i) * 0x4))
++
++/*
++ * Register Field Definitions
++ */
++/* LCDC_CFG0 */
++#define LCDC_CFG0_CLKPOL	(0x1 << 0)
++#define LCDC_CFG0_CLKBYP	(0x1 << 1)
++#define LCDC_CFG0_CLKSEL	(0x1 << 2)
++#define LCDC_CFG0_CLKPWMSEL	(0x1 << 3)
++#define LCDC_CFG0_CGDISBASE	(0x1 << 8)
++#define LCDC_CFG0_CGDISOVR1	(0x1 << 9)
++#define LCDC_CFG0_CGDISOVR2	(0x1 << 10)
++#define LCDC_CFG0_CGDISHEO	(0x1 << 11)
++#define LCDC_CFG0_CGDISPP	(0x1 << 13)
++#define LCDC_CFG0_CLKDIV_MASK	(0xff << 16)
++#define LCDC_CFG0_CLKDIV(x)	(((x) << 16) & LCDC_CFG0_CLKDIV_MASK)
++
++/* LCDC_CFG1 */
++#define LCDC_CFG1_HSPW_MASK	(0x3ff << 0)
++#define LCDC_CFG1_HSPW(x)	(((x) << 0) & LCDC_CFG1_HSPW_MASK)
++#define LCDC_CFG1_VSPW_MASK	(0x3ff << 16)
++#define LCDC_CFG1_VSPW(x)	(((x) << 16) & LCDC_CFG1_VSPW_MASK)
++
++/* LCDC_CFG2 */
++#define LCDC_CFG2_VFPW_MASK	(0x3ff << 0)
++#define LCDC_CFG2_VFPW(x)	(((x) << 0) & LCDC_CFG2_VFPW_MASK)
++#define LCDC_CFG2_VBPW_MASK	(0x3ff << 16)
++#define LCDC_CFG2_VBPW(x)	(((x) << 16) & LCDC_CFG2_VBPW_MASK)
++
++/* LCDC_CFG3 */
++#define LCDC_CFG3_HFPW_MASK	(0x3ff << 0)
++#define LCDC_CFG3_HFPW(x)	(((x) << 0) & LCDC_CFG3_HFPW_MASK)
++#define LCDC_CFG3_HBPW_MASK	(0x3ff << 16)
++#define LCDC_CFG3_HBPW(x)	(((x) << 16) & LCDC_CFG3_HBPW_MASK)
++
++/* LCDC_CFG4 */
++#define LCDC_CFG4_PPL_MASK	(0x7ff << 0)
++#define LCDC_CFG4_PPL(x)	(((x) << 0) & LCDC_CFG4_PPL_MASK)
++#define LCDC_CFG4_RPF_MASK	(0x7ff << 16)
++#define LCDC_CFG4_RPF(x)	(((x) << 16) & LCDC_CFG4_RPF_MASK)
++
++/* LCDC_CFG5 */
++#define LCDC_CFG5_HSPOL			(0x1 << 0)
++#define LCDC_CFG5_VSPOL			(0x1 << 1)
++#define LCDC_CFG5_VSPDLYS		(0x1 << 2)
++#define LCDC_CFG5_VSPDLYE		(0x1 << 3)
++#define LCDC_CFG5_DISPPOL		(0x1 << 4)
++#define LCDC_CFG5_DITHER		(0x1 << 6)
++#define LCDC_CFG5_DISPDLY		(0x1 << 7)
++#define LCDC_CFG5_MODE_MASK		(0x7 << 8)
++#define LCDC_CFG5_MODE(x)		(((x) << 8) & LCDC_CFG5_MODE_MASK)
++#define     LCDC_CFG5_MODE_OUTPUT_12BPP	(0x0 << 8)
++#define     LCDC_CFG5_MODE_OUTPUT_16BPP	(0x1 << 8)
++#define     LCDC_CFG5_MODE_OUTPUT_18BPP	(0x2 << 8)
++#define     LCDC_CFG5_MODE_OUTPUT_24BPP	(0x3 << 8)
++#define     LCDC_CFG5_MODE_OUTPUT_DPI_16BPPCFG1	(0x0 << 8)
++#define     LCDC_CFG5_MODE_OUTPUT_DPI_16BPPCFG2	(0x1 << 8)
++#define     LCDC_CFG5_MODE_OUTPUT_DPI_16BPPCFG3	(0x2 << 8)
++#define     LCDC_CFG5_MODE_OUTPUT_DPI_18BPPCFG1	(0x3 << 8)
++#define     LCDC_CFG5_MODE_OUTPUT_DPI_18BPPCFG2	(0x4 << 8)
++#define     LCDC_CFG5_MODE_OUTPUT_DPI_24BPP		(0x5 << 8)
++#define LCDC_CFG5_DPI			(0x1 << 11)
++#define LCDC_CFG5_VSPSU			(0x1 << 12)
++#define LCDC_CFG5_VSPHO			(0x1 << 13)
++#define LCDC_CFG5_GUARDTIME_MASK	(0xff << 16)
++#define LCDC_CFG5_GUARDTIME(x)		(((x) << 16) & LCDC_CFG5_GUARDTIME_MASK)
++
++/* LCDC_CFG6 */
++#define LCDC_CFG6_PWMPS_MASK	(0x7 << 0)
++#define LCDC_CFG6_PWMPS(x)	(((x) << 0) & LCDC_CFG6_PWMPS_MASK)
++#define LCDC_CFG6_PWMPOL	(0x1 << 4)
++#define LCDC_CFG6_PWMCVAL_MASK	(0xff << 8)
++#define LCDC_CFG6_PWMCVAL(x)	(((x) << 8) & LCDC_CFG6_PWMCVAL_MASK)
++
++/* LCDC_CFG7 */
++#define LCDC_CFG7_ROW_MASK	(0x7ff << 0)
++#define LCDC_CFG7_ROW(x)	(((x) << 0) & LCDC_CFG7_ROW_MASK)
++
++/* LCDC_EN */
++#define LCDC_EN_CLKEN	(0x1 << 0)
++#define LCDC_EN_SYNCEN	(0x1 << 1)
++#define LCDC_EN_DISPEN	(0x1 << 2)
++#define LCDC_EN_PWMEN	(0x1 << 3)
++#define LCDC_EN_SDEN	(0x1 << 5)
++#define LCDC_EN_CMEN	(0x1 << 6)
++
++/* LCDC_DIS */
++#define LCDC_DIS_CLKDIS		(0x1 << 0)
++#define LCDC_DIS_SYNCDIS	(0x1 << 1)
++#define LCDC_DIS_DISPDIS	(0x1 << 2)
++#define LCDC_DIS_PWMDIS		(0x1 << 3)
++#define LCDC_DIS_SDDIS		(0x1 << 5)
++#define LCDC_DIS_CMDIS		(0x1 << 6)
++#define LCDC_DIS_CLKRST		(0x1 << 8)
++#define LCDC_DIS_SYNCRST	(0x1 << 9)
++#define LCDC_DIS_DISPRST	(0x1 << 10)
++#define LCDC_DIS_PWMRST		(0x1 << 11)
++
++/* LCDC_SR */
++#define LCDC_SR_CLKSTS	(0x1 << 0)
++#define LCDC_SR_LCDSTS	(0x1 << 1)
++#define LCDC_SR_DISPSTS	(0x1 << 2)
++#define LCDC_SR_PWMSTS	(0x1 << 3)
++#define LCDC_SR_SIPSTS	(0x1 << 4)
++#define LCDC_SR_SDSTS	(0x1 << 5)
++#define LCDC_SR_CMSTS	(0x1 << 6)
++
++/* LCDC_ATTR */
++#define LCDC_ATTR_BASE		(0x1 << 0)
++#define LCDC_ATTR_OVR1		(0x1 << 1)
++#define LCDC_ATTR_OVR2		(0x1 << 2)
++#define LCDC_ATTR_HEO		(0x1 << 3)
++#define LCDC_ATTR_BASECL	(0x1 << 8)
++#define LCDC_ATTR_OVR1CL	(0x1 << 9)
++#define LCDC_ATTR_OVR2CL	(0x1 << 10)
++#define LCDC_ATTR_HEOCL		(0x1 << 11)
++#define LCDC_ATTR_SIP		(0x1 << 31)
++
++/* LCDC_LAYER */
++#define LAYER_END	(0x1 << 0)
++#define LAYER_ERROR	(0x1 << 1)
++#define LAYER_OVF	(0x1 << 2)
++
++#define LAYER_ENABLE	(0x1 << 0)
++
++#define LAYER_CLA_MASK	(0x3fffffff << 2)
++#define LAYER_CLA(x)	(((x) << 2) & LAYER_CLA_MASK)
++
++#define LAYER_FBA_MASK	(0xffffffff)
++#define LAYER_FBA(x)	((x) & LAYER_FBA_MASK)
++
++#define LAYER_BLEN_MASK		(0x7 << 4)
++#define LAYER_BLEN(x)	(((x) << 4) & LAYER_BLEN_MASK)
++#define     LAYER_BLEN_INCR1	(0 << 4)
++#define     LAYER_BLEN_INCR4	(1 << 4)
++#define     LAYER_BLEN_INCR8	(2 << 4)
++#define     LAYER_BLEN_INCR16	(3 << 4)
++#define     LAYER_BLEN_INCR32	(4 << 4)
++#define LAYER_BLENCC_MASK	(0x7 << 8)
++#define LAYER_BLENCC(x)	(((x) << 8) & LAYER_BLENCC_MASK)
++#define     LAYER_BLENCC_INCR1	(0 << 8)
++#define     LAYER_BLENCC_INCR4	(1 << 8)
++#define     LAYER_BLENCC_INCR8	(2 << 8)
++#define     LAYER_BLENCC_INCR16	(3 << 8)
++#define     LAYER_BLENCC_INCR32	(4 << 8)
++
++#define LAYER_CLUTEN	(0x1 << 0)
++#define LAYER_GAM		(0x1 << 2)
++#define LAYER_RGBMODE_MASK	(0xf << 4)
++#define LAYER_RGBMODE(x)	(((x) << 4) & LAYER_RGBMODE_MASK)
++#define     LAYER_RGB_444			(0x0 << 4)
++#define     LAYER_ARGB_4444			(0x1 << 4)
++#define     LAYER_RGBA_4444			(0x2 << 4)
++#define     LAYER_RGB_565			(0x3 << 4)
++#define     LAYER_ARGB_1555			(0x4 << 4)
++#define     LAYER_RGB_666			(0x5 << 4)
++#define     LAYER_RGB_666PACKED		(0x6 << 4)
++#define     LAYER_ARGB_1666			(0x7 << 4)
++#define     LAYER_ARGB_PACKED		(0x8 << 4)
++#define     LAYER_RGB_888			(0x9 << 4)
++#define     LAYER_RGB_888_PACKED	(0x10 << 4)
++#define     LAYER_ARGB_1888			(0x11 << 4)
++#define     LAYER_ARGB_8888			(0x12 << 4)
++#define     LAYER_RGBA_8888			(0x13 << 4)
++#define LAYER_CLUTMODE_MASK	(0x3 << 8)
++#define LAYER_CLUTMODE(x)	(((x) << 8) & LAYER_CLUTMODE_MASK)
++#define     LAYER_CLUT_1BPP	(0x0 << 8)
++#define     LAYER_CLUT_2BPP	(0x1 << 8)
++#define     LAYER_CLUT_4BPP	(0x2 << 8)
++#define     LAYER_CLUT_8BPP	(0x3 << 8)
++
++#define LAYER_POS(x, y)			(((x) & 0x7ff) | (((y) & 0x7ff) << 16))
++#define LAYER_SIZE(x, y)		((((x) - 1) & 0x7ff) | ((((y) - 1) & 0x7ff) << 16))
++#define LAYER_STRIDE(x)			((x) & 0xffffffff)
++#define LAYER_R_G_B(r, g, b)	((((r) & 0xff) << 16) | (((g) & 0xff) << 8) | ((b) & 0xff))
++#define LAYER_RGB(x)			((x) & 0xffffff)
++
++#define LAYER_DMA		(0x1 << 0)
++#define LAYER_REP		(0x1 << 1)
++#define LAYER_DISCEN	(0x1 << 4)
++#define LAYER_VIDPRI	(0x1 << 5)
++
++#define LAYER_DISCXPOS_MASK (0x7ff << 0)
++#define LAYER_DISCXPOS(x)	(((x) << 0) & LAYER_DISCXPOS_MASK)
++#define LAYER_DISCYPOS_MASK (0x7ff << 16)
++#define LAYER_DISCYPOS(x)	(((x) << 16) & LAYER_DISCYPOS_MASK)
++
++#define LAYER_DISCXSIZE_MASK (0x7ff << 0)
++#define LAYER_DISCXSIZE(x)	(((x) << 0) & LAYER_DISCXSIZE_MASK)
++#define LAYER_DISCYSIZE_MASK (0x7ff << 16)
++#define LAYER_DISCYSIZE(x)	(((x) << 16) & LAYER_DISCYSIZE_MASK)
++
++#define LAYER_VXSYEN	(0x1 << 0)
++#define LAYER_VXSCEN	(0x1 << 1)
++#define LAYER_HXSYEN	(0x1 << 4)
++#define LAYER_HXSCEN	(0x1 << 5)
++
++#define LAYER_VXSYFACT_MASK	(0xffffff << 0)
++#define LAYER_VXSYFACT(x)	(((x) << 0) & LAYER_VXSYFACT_MASK)
++
++#define LAYER_VXSCFACT_MASK	(0xffffff << 0)
++#define LAYER_VXSCFACT(x)	(((x) << 0) & LAYER_VXSCFACT_MASK)
++
++#define LAYER_HXSYFACT_MASK	(0xffffff << 0)
++#define LAYER_HXSYFACT(x)	(((x) << 0) & LAYER_HXSYFACT_MASK)
++
++#define LAYER_HXSCFACT_MASK	(0xffffff << 0)
++#define LAYER_HXSCFACT(x)	(((x) << 0) & LAYER_HXSCFACT_MASK)
++
++#define LAYER_VXSYOFF_MASK	(0xf << 0)
++#define LAYER_VXSYOFF(x)	(((x) << 0) & LAYER_VXSYOFF_MASK)
++#define LAYER_VXSYOFF1_MASK	(0xf << 8)
++#define LAYER_VXSYOFF1(x)	(((x) << 8) & LAYER_VXSYOFF1_MASK)
++#define LAYER_VXSCOFF_MASK	(0xf << 16)
++#define LAYER_VXSCOFF(x)	(((x) << 16) & LAYER_VXSCOFF_MASK)
++#define LAYER_VXSCOFF1_MASK	(0xf << 24)
++#define LAYER_VXSCOFF1(x)	(((x) << 24) & LAYER_VXSCOFF1_MASK)
++
++#define LAYER_HXSYOFF_MASK	(0xf << 0)
++#define LAYER_HXSYOFF(x)	(((x) << 0) & LAYER_HXSYOFF_MASK)
++#define LAYER_HXSCOFF_MASK	(0xf << 16)
++#define LAYER_HXSCOFF(x)	(((x) << 16) & LAYER_HXSCOFF_MASK)
++
++#define LAYER_VXSYCFG_MASK	(0x3 << 0)
++#define LAYER_VXSYCFG(x)	(((x) << 0) & LAYER_VXSYCFG_MASK)
++#define LAYER_VXSYTAP2		(0x1 << 4)
++#define LAYER_VXSY1201N		(0x1 << 5)
++#define LAYER_VXSYBICU		(0x1 << 6)
++#define LAYER_VXSYCFG1_MASK	(0x3 << 8)
++#define LAYER_VXSYCFG1(x)	(((x) << 8) & LAYER_VXSYCFG1_MASK)
++#define LAYER_VXSCCFG_MASK	(0x3 << 16)
++#define LAYER_VXSCCFG(x)	(((x) << 16) & LAYER_VXSCCFG_MASK)
++#define LAYER_VXSCTAP2		(0x1 << 20)
++#define LAYER_VXSC1201N		(0x1 << 21)
++#define LAYER_VXSCBICU		(0x1 << 22)
++#define LAYER_VXSCCFG1_MASK	(0x3 << 24)
++#define LAYER_VXSCCFG1(x)	(((x) << 24) & LAYER_VXSCCFG1_MASK)
++
++#define LAYER_HXSYCFG_MASK	(0x3 << 0)
++#define LAYER_HXSYCFG(x)	(((x) << 0) & LAYER_HXSYCFG_MASK)
++#define LAYER_HXSYTAP2		(0x1 << 4)
++#define LAYER_HXSYBICU		(0x1 << 5)
++#define LAYER_HXSCCFG_MASK	(0x3 << 16)
++#define LAYER_HXSCCFG(x)	(((x) << 16) & LAYER_HXSCCFG_MASK)
++#define LAYER_HXSCTAP2		(0x1 << 20)
++#define LAYER_HXSCBICU		(0x1 << 21)
++
++#endif	/* #ifndef __AT91_XLCDC_H__ */
+diff --git a/include/board.h b/include/board.h
+index 02541e1c..68a9ab4a 100644
+--- a/include/board.h
++++ b/include/board.h
+@@ -59,6 +59,7 @@ extern void at91_mci2_hw_init(void);
+ extern void at91_sdhc_hw_init(void);
+ 
+ extern void at91_lcdc_hw_init(void);
++extern void at91_xlcdc_hw_init(void);
+ 
+ extern void at91_board_set_dtb_name(char *of_name);
+ 
+diff --git a/include/lvdsc.h b/include/lvdsc.h
+new file mode 100755
+index 00000000..26331ceb
+--- /dev/null
++++ b/include/lvdsc.h
+@@ -0,0 +1,12 @@
++/*
++ * Copyright (C) 2024 Microchip Technology Inc. and its subsidiaries
++ *
++ * SPDX-License-Identifier: MIT
++ */
++
++#ifndef	__LVDSC_H__
++#define	__LVDSC_H__
++
++extern void lvdsc_start(void);
++
++#endif	/* #ifndef __LVDSC_H__ */
+-- 
+2.34.1
+

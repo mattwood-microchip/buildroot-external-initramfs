@@ -1,0 +1,51 @@
+#!/bin/sh
+
+# init script to boot main app image
+
+MAINFS_BLKDEV="/dev/mmcblk0p2"
+MAINFS_MOUNT="/mnt"
+CMDLINE=""
+CONSOLE="/dev/console"
+
+fail() {
+    echo $1 >$CONSOLE
+    echo >$CONSOLE
+    exec sh
+}
+
+# do initial setup
+init_system() {
+    CMDLINE=`cat /proc/cmdline`
+
+    mkdir -p /proc /sys /run /run/media /var/run
+    mount -t proc proc /proc
+    mount -t sysfs sysfs /sys
+    mount -t devtmpfs none /dev
+    mkdir -p /dev/shm
+    mount -t tmpfs shm /dev/shm
+
+    mdev -s
+}
+
+boot_main_image() {
+    echo ""
+    echo "/*****************************************************************************/"
+    echo "/******************* Booting main image from $MAINFS_BLKDEV ******************/"
+    echo "/*****************************************************************************/"
+    echo ""
+
+    # prepare to switch_root to actual filesystem
+    mount $MAINFS_BLKDEV $MAINFS_MOUNT
+    mount -o move /proc ${MAINFS_MOUNT}/proc
+    mount -o move /sys ${MAINFS_MOUNT}/sys
+    mount -o move /dev ${MAINFS_MOUNT}/dev
+
+    cd $MAINFS_MOUNT
+
+    exec switch_root -c $CONSOLE $MAINFS_MOUNT /sbin/init $CMDLINE
+}
+
+# main entry point
+init_system
+
+boot_main_image

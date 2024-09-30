@@ -1,0 +1,35 @@
+From 912557c3796556431e42adbdbc95fbf2abeb0570 Mon Sep 17 00:00:00 2001
+From: user <xing.chen@microchip.com>
+Date: Fri, 26 Jul 2024 13:21:25 +0800
+Subject: [PATCH 2/5] Add fastboot defconfig file for sam9x75 curiosity
+
+---
+ .../sam9x75_curiositysd_uboot_fastboot_defconfig | 16 ++++++++++++++++
+ 1 file changed, 16 insertions(+)
+ create mode 100644 configs/sam9x75_curiositysd_uboot_fastboot_defconfig
+
+diff --git a/configs/sam9x75_curiositysd_uboot_fastboot_defconfig b/configs/sam9x75_curiositysd_uboot_fastboot_defconfig
+new file mode 100644
+index 00000000..5bea2ce3
+--- /dev/null
++++ b/configs/sam9x75_curiositysd_uboot_fastboot_defconfig
+@@ -0,0 +1,16 @@
++CONFIG_SAM9X7=y
++# CONFIG_SCLK is not set
++CONFIG_DEBUG=y
++CONFIG_DDR_SET_BY_DEVICE=y
++CONFIG_DDR_W632GU6NG=y
++CONFIG_SDCARD=y
++CONFIG_SDHC_ASYNC_READ=y
++CONFIG_SDHC_ASYNC_READ_QUEUE_SIZE="256"
++CONFIG_BOARD_QUIRK_SAM9X75_CURIOSITY=y
++CONFIG_LED_ON_BOARD=y
++CONFIG_LED_R_ON_PIOC=y
++CONFIG_LED_R_PIN=19
++CONFIG_LED_G_ON_PIOC=y
++CONFIG_LED_G_PIN=21
++CONFIG_LED_B_ON_PIOC=y
++CONFIG_LED_B_PIN=20
+-- 
+2.34.1
+

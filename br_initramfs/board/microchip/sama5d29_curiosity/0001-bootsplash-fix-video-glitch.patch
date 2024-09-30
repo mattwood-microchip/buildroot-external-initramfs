@@ -1,0 +1,40 @@
+diff --git a/drivers/gpu/drm/atmel-hlcdc/atmel_hlcdc_plane.c b/drivers/gpu/drm/atmel-hlcdc/atmel_hlcdc_plane.c
+index 0483c442c120..09ef5b589fb5 100644
+--- a/drivers/gpu/drm/atmel-hlcdc/atmel_hlcdc_plane.c
++++ b/drivers/gpu/drm/atmel-hlcdc/atmel_hlcdc_plane.c
+@@ -547,12 +547,18 @@ static void update_hlcdc_buffers(struct atmel_hlcdc_plane *plane,
+ 				 struct atmel_hlcdc_plane_state *state,
+ 				 u32 sr, int i)
+ {
++	static int force_update = 1;
++
+ 	atmel_hlcdc_layer_write_reg(&plane->layer,
+ 				    ATMEL_HLCDC_LAYER_PLANE_HEAD(i),
+ 				    state->dscrs[i]->self);
+ 
+-	if (sr & ATMEL_HLCDC_LAYER_EN)
+-		return;
++	if (unlikely(force_update))
++		force_update = 0;
++	else {
++		if (sr & ATMEL_HLCDC_LAYER_EN)
++			return;
++	}
+ 
+ 	atmel_hlcdc_layer_write_reg(&plane->layer,
+ 				    ATMEL_HLCDC_LAYER_PLANE_ADDR(i),
+diff --git a/drivers/video/backlight/pwm_bl.c b/drivers/video/backlight/pwm_bl.c
+index 289bd9ce4d36..b948f04cf0f8 100644
+--- a/drivers/video/backlight/pwm_bl.c
++++ b/drivers/video/backlight/pwm_bl.c
+@@ -528,6 +528,10 @@ static int pwm_backlight_probe(struct platform_device *pdev)
+ 	if (!state.period && (data->pwm_period_ns > 0))
+ 		state.period = data->pwm_period_ns;
+ 
++
++	state.enabled = 1;
++	state.duty_cycle = 50000;
++
+ 	ret = pwm_apply_state(pb->pwm, &state);
+ 	if (ret) {
+ 		dev_err(&pdev->dev, "failed to apply initial PWM state: %d\n",
